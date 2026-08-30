@@ -1,0 +1,28 @@
+name: ai_safe_route_finder
+description: "SIH Prototype - AI Safe Route Finder (Safe. Smart. Together.)"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.6
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  flutter_launcher_icons: ^0.14.4
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/logo.jpeg
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/logo.jpeg"
