@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+// import 'package:firebase_core/firebase_core.dart';
+// import 'firebase_options.dart';
 import 'theme/app_theme.dart';
 import 'screens/splash_screen.dart';
 import 'screens/auth_screen.dart';
@@ -8,11 +10,14 @@ import 'screens/ai_analysis_screen.dart';
 import 'screens/route_check_screen.dart';
 import 'screens/navigation_screen.dart';
 import 'screens/sos_screen.dart';
+import 'screens/route_map_screen.dart';
 import 'screens/journey_end_screen.dart';
 import 'screens/feedback_screen.dart';
 import 'screens/database_update_screen.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   runApp(const AISafeRouteFinderApp());
 }
 
@@ -29,7 +34,15 @@ class AISafeRouteFinderApp extends StatelessWidget {
       routes: {
         '/': (context) => const SplashScreen(),
         '/auth': (context) => const AuthScreen(),
-        '/destination': (context) => const DestinationScreen(),
+
+        // The real map replaces the old destination -> data collection -> AI analysis ->
+        // route check -> navigation -> SOS steps. Anything that opens '/destination'
+        // (your sign-in screen) now lands on the live map.
+        '/destination': (context) => const RouteMapScreen(),
+        '/map': (context) => const RouteMapScreen(),
+
+        // Old demo screens, kept so nothing is lost and imports stay valid.
+        '/old/destination': (context) => const DestinationScreen(),
         '/collection': (context) => const SafetyCollectionScreen(),
         '/analysis': (context) => const AIAnalysisScreen(),
         '/routecheck': (context) => const RouteCheckScreen(),
