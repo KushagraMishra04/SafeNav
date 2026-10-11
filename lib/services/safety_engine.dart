@@ -261,7 +261,9 @@ class SafetyEngine {
   }
 
   /// OSRM alternatives + two sideways detours, so the scorer has real choices.
-  Future<List<RawRoute>> candidateRoutes(LatLng a, LatLng b) async {
+  Future<List<RawRoute>> candidateRoutes(LatLng a, LatLng b, {bool quick = false}) async {
+    // quick: one direct route and no detour requests, for emergencies where speed matters
+    if (quick) return (await _osrm([a, b])).take(1).toList();
     final out = await _osrm([a, b], alternatives: '3');
     final mid = LatLng((a.latitude + b.latitude) / 2, (a.longitude + b.longitude) / 2);
     final dx = b.longitude - a.longitude, dy = b.latitude - a.latitude;

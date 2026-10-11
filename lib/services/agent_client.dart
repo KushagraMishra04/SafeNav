@@ -76,4 +76,8 @@ class Sos {
   }
 
   static Future<void> call112() => launchUrl(Uri.parse('tel:112'));
+
+  /// Opens the SMS app with any pre-filled text (the user taps send).
+  static Future<void> sms(List<String> contacts, String body) =>
+      launchUrl(Uri.parse('sms:${contacts.join(',')}?body=${Uri.encodeComponent(body)}'));
 }

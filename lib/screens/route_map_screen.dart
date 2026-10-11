@@ -7,9 +7,14 @@ import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import '../services/agent_client.dart';
 import '../services/review_service.dart';
 import '../services/safety_engine.dart';
+import '../services/shake_detector.dart';
+import '../services/stretch_engine.dart';
+import '../services/trip_share.dart';
+import '../services/voice.dart';
 
 class RouteMapScreen extends StatefulWidget {
   final List<String> contacts; // phone numbers from your emergency-contacts screen
@@ -43,6 +48,18 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
   Timer? _demo;
   bool _demoMode = false;
   double _maxDetour = 1.4;
+  final _voice = Voice();
+  final _trip = TripShare();
+  late final ShakeDetector _shake = ShakeDetector(_onShake);
+  final _ssCache = <String, StretchSet>{};
+  final _warned = <int>{};
+  String _warning = '';
+  Timer? _warnTimer, _gTicker;
+  int _spokenStep = -1;
+  bool _headingUp = true;
+  double? _heading;
+  LatLng? _hPrev;
+  DateTime? _guardianEnd;
   DateTime _lastMove = DateTime.now();
   StreamSubscription<Position>? _sub;
 
@@ -64,6 +81,12 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
   void dispose() {
     _sub?.cancel();
     _demo?.cancel();
+    _warnTimer?.cancel();
+    _gTicker?.cancel();
+    _shake.stop();
+    _voice.stop();
+    WakelockPlus.disable();
+    unawaited(_trip.end('stopped'));
     _search.dispose();
     super.dispose();
   }
@@ -96,7 +119,7 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
   }
 
   // ---------- planning ----------
-  Future<void> _plan(Place d) async {
+  Future<void> _plan(Place d, {bool quick = false}) async {
     if (_me == null) return;
     final km = meters(_me!, d.at) / 1000;
     if (km > 8) {
@@ -114,7 +137,7 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
       _stage = 'Finding walking routes…';
     });
     try {
-      _raws = await _engine.candidateRoutes(_me!, d.at);
+      _raws = await _engine.candidateRoutes(_me!, d.at, quick: quick);
       if (_raws.isEmpty) throw 'No walking route found for this destination.';
       final all = _raws.expand((r) => r.points).toList();
       setState(() => _stage = 'Reading street lighting, shops and help points…');
@@ -128,10 +151,13 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
       setState(() => _stage = 'Scoring routes…');
       _rescore();
       _stepIdx = 0;
+      _spokenStep = -1;
+      _warned.clear();
       final best = _sel!;
+      unawaited(_trip.update(_me!, dest: d.name, force: true));
       _fit(best);
       _advice = _localAdvice(best);
-      _askAgent(null);
+      if (!quick) _askAgent(null);
     } catch (e) {
       _toast('$e');
     } finally {
@@ -143,6 +169,7 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
     if (_osm == null || _raws.isEmpty) return;
     final scored = _engine.score(_raws, _osm!, _revs, night: _night, weights: _weights);
     final best = _engine.pickBest(scored, maxDetour: _maxDetour);
+    _ssCache.clear();
     setState(() {
       _routes = scored;
       if (!(keepSelection && scored.any((r) => r.id == _selId))) _selId = best.id;
@@ -268,13 +295,41 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
   }
 
   // ---------- navigation ----------
+  StretchSet? get _sset {
+    final r = _sel, o = _osm;
+    if (r == null || o == null) return null;
+    return _ssCache.putIfAbsent(
+        r.id, () => buildStretches(r.raw, o, _revs, night: _night, weights: _weights));
+  }
+
+  LocationSettings _locSettings() => defaultTargetPlatform == TargetPlatform.android
+      ? AndroidSettings(
+          accuracy: LocationAccuracy.high,
+          distanceFilter: 8,
+          // foreground service: keeps tracking alive when the screen turns off
+          foregroundNotificationConfig: const ForegroundNotificationConfig(
+              notificationTitle: 'SafeNav is guarding your trip',
+              notificationText: 'Live location is on',
+              enableWakeLock: true))
+      : const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 8);
+
+  double _speed(ScoredRoute r) => r.raw.distanceM / (r.raw.durationS == 0 ? 1 : r.raw.durationS);
+
   void _startNav({bool demo = false}) {
     final r = _sel;
     if (r == null) return;
     _lastMove = DateTime.now();
     _stepIdx = 0;
+    _spokenStep = -1;
+    _warned.clear();
+    _heading = null;
+    _hPrev = null;
     _demoMode = demo;
     setState(() => _navigating = true);
+    WakelockPlus.enable();
+    _shake.start();
+    final first = r.raw.steps.isEmpty ? '' : ' ${r.raw.steps.first.text}.';
+    _voice.say('Navigation started.$first');
     if (demo) {
       // Simulated walk along the chosen route, so navigation can be shown indoors.
       final pts = densify(r.raw.points, 12);
@@ -287,22 +342,34 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
         _onLoc(pts[i++]);
       });
     } else {
-      _sub = Geolocator.getPositionStream(
-              locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 8))
-          .listen((p) => _onLoc(LatLng(p.latitude, p.longitude)));
+      _sub = Geolocator.getPositionStream(locationSettings: _locSettings()).listen((p) => _onLoc(
+          LatLng(p.latitude, p.longitude),
+          heading: (p.speed > 0.5 && p.heading >= 0) ? p.heading : null));
     }
   }
 
-  Future<void> _stopNav() async {
+  Future<void> _stopNav({String trip = 'stopped'}) async {
     _demo?.cancel();
     _demo = null;
     final s = _sub;
     _sub = null;
-    if (mounted) setState(() { _navigating = false; _demoMode = false; });
+    _shake.stop();
+    _voice.stop();
+    WakelockPlus.disable();
+    _cancelGuardian();
+    unawaited(_trip.end(trip));
+    if (mounted) {
+      setState(() {
+        _navigating = false;
+        _demoMode = false;
+        _warning = '';
+      });
+      _map.rotate(0);
+    }
     await s?.cancel();
   }
 
-  void _onLoc(LatLng here) {
+  void _onLoc(LatLng here, {double? heading}) {
     if (!_navigating) return;
     setState(() => _me = here);
     final cur = _sel;
@@ -311,8 +378,26 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
       while (_stepIdx < cur.raw.steps.length - 1 && meters(here, cur.raw.steps[_stepIdx].at) < 25) {
         _stepIdx++;
       }
+      _speakStep(cur, here);
+      _checkWarnings(here);
+      unawaited(_trip.update(here, etaMin: (_remainingM(cur) / _speed(cur) / 60).ceil()));
     }
-    _map.move(here, 17);
+
+    // heading-up map, with the heading smoothed so the map does not jitter
+    var h = heading;
+    if (h == null && _hPrev != null && meters(here, _hPrev!) > 4) h = bearingDeg(_hPrev!, here);
+    if (h != null) {
+      _hPrev = here;
+      final old = _heading;
+      _heading = old == null ? h : (old + (((h - old + 540) % 360) - 180) * 0.35) % 360;
+    }
+    _hPrev ??= here;
+    if (_headingUp && _heading != null) {
+      _map.moveAndRotate(here, 18, -_heading!);
+    } else {
+      _map.move(here, 18);
+    }
+
     if (_lastPos == null || meters(here, _lastPos!) > 15) {
       _lastPos = here;
       _lastMove = DateTime.now();
@@ -332,31 +417,212 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
     }
   }
 
-  Future<void> _checkIn() async {
-    if (_checkInOpen) return;
+  void _speakStep(ScoredRoute r, LatLng here) {
+    if (r.raw.steps.isEmpty || _spokenStep == _stepIdx) return;
+    final st = r.raw.steps[_stepIdx];
+    final d = meters(here, st.at);
+    if (d <= 70) {
+      _spokenStep = _stepIdx;
+      Voice.tap();
+      _voice.say(d < 20 ? st.text : 'In ${(d / 10).round() * 10} metres, ${st.text}');
+    }
+  }
+
+  /// Warns once per risky stretch, about 150 m before you reach it.
+  void _checkWarnings(LatLng here) {
+    final ss = _sset;
+    if (ss == null) return;
+    final ni = ss.nearestIndex(here);
+    for (var k = 0; k < ss.stretches.length; k++) {
+      final st = ss.stretches[k];
+      if (st.to < ni || !st.risky || st.confidence < warnMinConfidence || _warned.contains(k)) continue;
+      final dist = st.from <= ni ? 0.0 : meters(here, ss.samples[st.from]);
+      if (dist > 160) break;
+      _warned.add(k);
+      final len = ((st.to - st.from + 1) * 25).round();
+      final where = dist < 30 ? 'You are entering' : 'In ${dist.round()} metres,';
+      _showWarning('$where a risky stretch of about $len m: ${st.reason ?? 'low safety signals'}. Stay alert.');
+      break;
+    }
+  }
+
+  void _showWarning(String m) {
+    if (!mounted) return;
+    setState(() => _warning = m);
+    Voice.alert();
+    _voice.say(m);
+    _warnTimer?.cancel();
+    _warnTimer = Timer(const Duration(seconds: 12), () {
+      if (mounted) setState(() => _warning = '');
+    });
+  }
+
+  Future<void> _checkIn({String reason = 'You stopped or left your route.'}) async {
+    if (_checkInOpen || !mounted) return;
     _checkInOpen = true;
+    Voice.alert();
     final ok = await showDialog<bool>(
-        context: context, barrierDismissible: false, builder: (_) => const _CheckInDialog());
+        context: context, barrierDismissible: false, builder: (_) => _CheckInDialog(reason));
     _checkInOpen = false;
     _lastMove = DateTime.now();
-    if (ok != true) _sos();
+    if (ok != true) {
+      unawaited(_trip.setStatus('noreply'));
+      _sos(auto: true);
+    }
   }
 
   Future<void> _finish() async {
-    await _stopNav();
+    final dest = _dest?.name ?? 'my destination';
+    final route = _sel;
+    await _stopNav(trip: 'arrived');
+    Voice.alert();
+    _voice.say('You have arrived.');
     if (!mounted) return;
     final d = await showReviewForm(context, 'You arrived. How safe did this route feel?');
-    final r = _sel;
-    if (d == null || r == null) return;
-    try {
-      final online = await _reviews.addForTrip(
-          points: r.raw.points, rating: d.rating, tags: d.tags, text: d.text, tripId: _tripId);
-      _toast(online
-          ? 'Thanks. Your feedback now helps score this route for others.'
-          : 'Thanks. Saved on this device (cloud sync is not set up yet).');
-    } catch (e) {
-      _toast('Could not save feedback: $e');
+    if (d != null && route != null) {
+      try {
+        final online = await _reviews.addForTrip(
+            points: route.raw.points, rating: d.rating, tags: d.tags, text: d.text, tripId: _tripId);
+        _toast(online
+            ? 'Thanks. Your feedback now helps score this route for others.'
+            : 'Thanks. Saved on this device (cloud sync is not set up yet).');
+      } catch (e) {
+        _toast('Could not save feedback: $e');
+      }
     }
+    if (_contacts.isNotEmpty && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          duration: const Duration(seconds: 10),
+          content: const Text('Let your contacts know you arrived?'),
+          action: SnackBarAction(
+              label: 'Message', onPressed: () => Sos.sms(_contacts, "I've arrived safely at $dest."))));
+    }
+  }
+
+  // ---------- guardian timer ----------
+  String _mmss(Duration d) {
+    final s = d.inSeconds < 0 ? 0 : d.inSeconds;
+    return '${(s ~/ 60).toString().padLeft(2, '0')}:${(s % 60).toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _setGuardian() async {
+    final r = _sel;
+    final eta = r == null ? null : (r.raw.durationS / 60).ceil() + 10;
+    final mins = await showDialog<int>(
+      context: context,
+      builder: (_) => SimpleDialog(title: const Text('Guardian timer'), children: [
+        const Padding(
+            padding: EdgeInsets.fromLTRB(24, 0, 24, 8),
+            child: Text('If you do not tap "I\'m safe" in time, SafeNav asks if you are okay, then alerts your contacts.')),
+        for (final m in <int>[15, 30, 45, 60, if (eta != null) eta])
+          SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, m),
+              child: Text(m == eta ? '$m min (trip time + 10)' : '$m min')),
+      ]),
+    );
+    if (mins == null) return;
+    _cancelGuardian();
+    setState(() => _guardianEnd = DateTime.now().add(Duration(minutes: mins)));
+    unawaited(_trip.setGuardian(_guardianEnd));
+    _gTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      final end = _guardianEnd;
+      if (end == null || !mounted) return;
+      if (DateTime.now().isAfter(end)) {
+        _guardianExpired();
+      } else {
+        setState(() {});
+      }
+    });
+  }
+
+  Future<void> _guardianExpired() async {
+    _cancelGuardian();
+    await _checkIn(reason: 'Your guardian timer ended.');
+  }
+
+  void _cancelGuardian() {
+    _gTicker?.cancel();
+    _gTicker = null;
+    if (_guardianEnd != null) {
+      _guardianEnd = null;
+      unawaited(_trip.setGuardian(null));
+      if (mounted) setState(() {});
+    }
+  }
+
+  // ---------- shake to SOS ----------
+  void _onShake() {
+    if (_navigating) _sosCountdown();
+  }
+
+  // ---------- live trip sharing ----------
+  Future<void> _shareTrip() async {
+    if (_contacts.isEmpty) {
+      _toast('Add emergency contacts first.');
+      await _editContacts();
+      if (_contacts.isEmpty) return;
+    }
+    if (!mounted) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Share this trip?'),
+        content: const Text('Your contacts get a link that shows your live location and ETA until you arrive or stop sharing.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Share')),
+        ],
+      ),
+    );
+    final at = _me;
+    if (ok != true || at == null || !mounted) return;
+    final dest = _dest?.name ?? 'my destination';
+    final r = _sel;
+    final eta = r == null ? 0 : (r.raw.durationS / 60).ceil();
+    final live = await _trip.start(at: at, dest: dest, etaMin: eta, guardianEnd: _guardianEnd);
+    if (!mounted) return;
+    final link = _trip.link;
+    if (live && link != null) {
+      await Sos.sms(_contacts, "I'm walking to $dest (about $eta min). Follow my live location: $link");
+    } else {
+      _toast('Live link is not set up yet (see SETUP.md), so I am sending a one-time location.');
+      await Sos.sms(_contacts,
+          "I'm walking to $dest (about $eta min). I'm here now: https://maps.google.com/?q=${at.latitude},${at.longitude} . I'll message when I arrive.");
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _stopSharing() async {
+    await _trip.end('stopped');
+    if (mounted) setState(() {});
+  }
+
+  // ---------- nearest safe place, even while navigating ----------
+  Future<void> _safePlace() async {
+    final me = _me;
+    if (me == null) return;
+    _toast('Looking for the nearest help…');
+    final res = await Future.wait([_engine.nearbyPlaces(me, 'police'), _engine.nearbyPlaces(me, 'hospital')]);
+    final all = [...res[0], ...res[1]]..sort((a, b) => meters(me, a.at).compareTo(meters(me, b.at)));
+    if (!mounted) return;
+    if (all.isEmpty) {
+      _toast('No police station or hospital found within 5 km.');
+      return;
+    }
+    final pick = await showModalBottomSheet<Place>(
+      context: context,
+      builder: (_) => SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+        const Padding(
+            padding: EdgeInsets.all(16),
+            child: Text('Nearest help', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700))),
+        for (final p in all.take(4))
+          ListTile(leading: const Icon(Icons.local_police), title: Text(p.name), onTap: () => Navigator.pop(context, p)),
+      ])),
+    );
+    if (pick == null) return;
+    _voice.say('Heading to ${pick.name}');
+    _plan(pick, quick: true);
   }
 
   // ---------- reviews & SOS ----------
@@ -394,27 +660,50 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
         ),
       );
 
-  Future<void> _sos() async {
+  Future<void> _sosCountdown() async {
+    if (_checkInOpen || !mounted) return;
+    _checkInOpen = true;
+    Voice.alert();
+    final go = await showDialog<bool>(
+        context: context, barrierDismissible: false, builder: (_) => const _SosCountdown());
+    _checkInOpen = false;
+    if (go == true) _sos(auto: true);
+  }
+
+  Future<void> _sos({bool auto = false}) async {
     Position? pos;
     try {
-      pos = await Geolocator.getLastKnownPosition();
-    } catch (_) {}
+      pos = await Geolocator.getCurrentPosition().timeout(const Duration(seconds: 4));
+    } catch (_) {
+      try {
+        pos = await Geolocator.getLastKnownPosition();
+      } catch (_) {}
+    }
+    final at = pos != null ? LatLng(pos.latitude, pos.longitude) : _me;
+    unawaited(_trip.setStatus('sos', at: at)); // the live tracking page turns red
+    if (auto && _contacts.isNotEmpty) await Sos.message(_contacts, pos);
     if (!mounted) return;
     await showDialog(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Emergency'),
-        content: Text(_contacts.isEmpty
-            ? 'No emergency contacts saved yet. Add some, or call 112.'
-            : 'Send your live location to ${_contacts.length} contact(s)?'),
+        content: Text(auto
+            ? 'SOS raised. If you shared your trip, your contacts can see it now. Call 112 if you need help right away.'
+            : (_contacts.isEmpty
+                ? 'No emergency contacts saved yet. Add some, or call 112.'
+                : 'Send your live location to ${_contacts.length} contact(s)?')),
         actions: [
           if (_contacts.isNotEmpty)
-            FilledButton(onPressed: () { Sos.message(_contacts, pos); Navigator.pop(context); }, child: const Text('Message contacts')),
+            FilledButton(
+                onPressed: () { Sos.message(_contacts, pos); Navigator.pop(context); },
+                child: const Text('Message contacts')),
           FilledButton(
               style: FilledButton.styleFrom(backgroundColor: Colors.red),
               onPressed: () { Sos.call112(); Navigator.pop(context); },
               child: const Text('Call 112')),
-          TextButton(onPressed: () { Navigator.pop(context); _editContacts(); }, child: Text(_contacts.isEmpty ? 'Add contacts' : 'Edit contacts')),
+          TextButton(
+              onPressed: () { Navigator.pop(context); _editContacts(); },
+              child: Text(_contacts.isEmpty ? 'Add contacts' : 'Edit contacts')),
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
         ],
       ),
@@ -422,12 +711,33 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
   }
 
   // ---------- UI ----------
-  Color _tier(ScoredRoute r) => r.score >= 70
+  Color _tierColor(int score) => score >= 70
       ? const Color(0xFF2E8B57)
-      : r.score >= 45 ? const Color(0xFFE0A030) : const Color(0xFFD64545);
+      : score >= 45 ? const Color(0xFFE0A030) : const Color(0xFFD64545);
+
+  Color _tier(ScoredRoute r) => _tierColor(r.score);
 
   Widget _dot(Color c) => Container(
       decoration: BoxDecoration(color: c, shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 2)));
+
+  /// The chosen route drawn stretch by stretch (green, amber, red). Walked parts turn grey.
+  List<Polyline> _routeLines(ScoredRoute sel) {
+    final ss = _sset;
+    final out = <Polyline>[Polyline(points: sel.raw.points, strokeWidth: 10, color: Colors.white)];
+    if (ss == null || ss.stretches.isEmpty) {
+      out.add(Polyline(points: sel.raw.points, strokeWidth: 6, color: _tier(sel)));
+      return out;
+    }
+    final ni = (_navigating && _me != null) ? ss.nearestIndex(_me!) : -1;
+    for (final st in ss.stretches) {
+      final walked = st.to < ni;
+      out.add(Polyline(
+          points: ss.pointsOf(st),
+          strokeWidth: walked ? 4 : 6,
+          color: walked ? Colors.grey.withValues(alpha: .6) : _tierColor(st.score)));
+    }
+    return out;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -444,16 +754,14 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
           children: [
             TileLayer(
                 urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                userAgentPackageName: 'com.example.safenav'), // use your real application id
+                userAgentPackageName: 'com.example.safenav', // use your real application id
+                ),
             PolylineLayer(polylines: [
               for (final r in _routes.where((r) => r.id != _selId))
                 Polyline(points: r.raw.points, strokeWidth: 5, color: _tier(r).withValues(alpha: .45)),
-              if (sel != null) ...[
-                Polyline(points: sel.raw.points, strokeWidth: 10, color: Colors.white),
-                Polyline(points: sel.raw.points, strokeWidth: 6, color: _tier(sel)),
-              ],
+              if (sel != null) ..._routeLines(sel),
             ]),
-            MarkerLayer(markers: [
+            MarkerLayer(rotate: true, markers: [
               if (_me != null)
                 Marker(point: _me!, width: 44, height: 44,
                     child: Stack(alignment: Alignment.center, children: [
@@ -479,35 +787,64 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
         SafeArea(child: Padding(padding: const EdgeInsets.all(12), child: _topBar())),
         Positioned(
             left: 0, right: 0, bottom: 0,
-            child: _busy ? _busyCard() : (sel != null ? (_navigating ? _navCard(sel) : _panel(sel)) : _hint())),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              if (_warning.isNotEmpty) _warningBanner(),
+              _busy ? _busyCard() : (sel != null ? (_navigating ? _navCard(sel) : _panel(sel)) : _hint()),
+            ])),
       ]),
     );
   }
 
+  Widget _warningBanner() => Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+          color: const Color(0xFFFFF4E0),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: const Color(0xFFE0A030), width: 1.5)),
+      child: Row(children: [
+        const Icon(Icons.warning_amber_rounded, color: Color(0xFFB36B00)),
+        const SizedBox(width: 10),
+        Expanded(child: Text(_warning, style: const TextStyle(color: Color(0xFF5A3A00)))),
+        if (!_trip.active) TextButton(onPressed: _shareTrip, child: const Text('Share trip')),
+      ]));
+
   Widget _topBar() => Column(children: [
         Row(children: [
-          Expanded(
-              child: Card(
-                  margin: EdgeInsets.zero,
-                  child: TextField(
-                    controller: _search,
-                    textInputAction: TextInputAction.search,
-                    onSubmitted: _searchPlaces,
-                    decoration: const InputDecoration(
-                        hintText: 'Where do you want to go?',
-                        prefixIcon: Icon(Icons.search),
-                        border: InputBorder.none,
-                        contentPadding: EdgeInsets.symmetric(vertical: 14)),
-                  ))),
+          _navigating
+              ? const Spacer()
+              : Expanded(
+                  child: Card(
+                      margin: EdgeInsets.zero,
+                      child: TextField(
+                        controller: _search,
+                        textInputAction: TextInputAction.search,
+                        onSubmitted: _searchPlaces,
+                        decoration: const InputDecoration(
+                            hintText: 'Where do you want to go?',
+                            prefixIcon: Icon(Icons.search),
+                            border: InputBorder.none,
+                            contentPadding: EdgeInsets.symmetric(vertical: 14)),
+                      ))),
           const SizedBox(width: 8),
           FloatingActionButton.small(
               heroTag: 'loc',
               onPressed: () { if (_me != null) _map.move(_me!, 16); },
               child: const Icon(Icons.my_location)),
           const SizedBox(width: 8),
-          FloatingActionButton.small(
-              heroTag: 'sos', backgroundColor: Colors.red, foregroundColor: Colors.white,
-              onPressed: _sos, child: const Text('SOS', style: TextStyle(fontWeight: FontWeight.bold))),
+          // tap: options. press and hold: instant 5-second SOS countdown
+          Material(
+              color: Colors.red,
+              shape: const CircleBorder(),
+              elevation: 4,
+              child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: _sos,
+                  onLongPress: _sosCountdown,
+                  child: const SizedBox(
+                      width: 44,
+                      height: 44,
+                      child: Center(child: Text('SOS', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)))))),
         ]),
         if (_routes.isEmpty && _results.isEmpty && !_busy)
           Padding(
@@ -537,7 +874,8 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
           child: Padding(
               padding: EdgeInsets.all(14),
               child: Text('Search a destination to find the safest walking route.\n'
-                  'Long-press the map near you to review a spot.'))));
+                  'Long-press the map near you to review a spot.\n'
+                  'Hold SOS for an instant 5-second alert. While navigating, shaking the phone 4 times does the same.'))));
 
   Widget _busyCard() => Padding(
       padding: const EdgeInsets.all(16),
@@ -597,47 +935,83 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
     if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) _toast('Could not open Google Maps.');
   }
 
+  /// One line summarising the risky stretches (computed by the scoring engine, no AI needed).
+  (String, bool)? _riskLine() {
+    final ss = _sset;
+    if (ss == null) return null;
+    final risky = ss.stretches.where((s) => s.risky && s.confidence >= warnMinConfidence).toList();
+    if (risky.isEmpty) return ('No risky stretches detected with the data available.', false);
+    final m = risky.fold<int>(0, (a, s) => a + (s.to - s.from + 1) * 25);
+    return ('${risky.length} risky stretch${risky.length == 1 ? '' : 'es'} (about $m m): ${risky.first.reason ?? 'low safety signals'}.', true);
+  }
+
   Widget _navCard(ScoredRoute r) {
     final steps = r.raw.steps;
     final step = steps.isEmpty ? null : steps[_stepIdx.clamp(0, steps.length - 1).toInt()];
     final rem = _remainingM(r);
-    final speed = r.raw.distanceM / (r.raw.durationS == 0 ? 1 : r.raw.durationS); // metres per second
-    final mins = (rem / speed / 60).ceil();
+    final mins = (rem / _speed(r) / 60).ceil();
     final toStep = (step != null && _me != null) ? meters(_me!, step.at) : 0.0;
+    final gEnd = _guardianEnd;
     return Material(
         elevation: 12,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(22)),
         child: SafeArea(
             top: false,
-            child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
-                child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  if (step != null) ...[
-                    Text(step.text, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
-                    Text('in ${_fmt(toStep)}', style: Theme.of(context).textTheme.bodyMedium),
-                    const SizedBox(height: 10),
-                  ],
-                  Row(children: [
-                    Text('${_fmt(rem)} left · $mins min'),
-                    const Spacer(),
-                    Text('Safety ${r.score}/100', style: TextStyle(color: _tier(r), fontWeight: FontWeight.w700)),
-                  ]),
-                  if (_demoMode)
-                    Text('Demo walk: simulated GPS', style: Theme.of(context).textTheme.bodySmall),
-                  const SizedBox(height: 10),
-                  Row(children: [
-                    Expanded(
-                        child: FilledButton.icon(
-                            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-                            onPressed: _stopNav,
-                            icon: const Icon(Icons.stop),
-                            label: const Text('Stop'))),
-                    const SizedBox(width: 8),
-                    OutlinedButton(onPressed: () => _openInGoogleMaps(r), child: const Text('Google Maps')),
-                  ]),
-                  if (_demoMode)
-                    TextButton(onPressed: _checkIn, child: const Text('Test safety check-in')),
-                ]))));
+            child: ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.5),
+                child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+                    child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      if (step != null) ...[
+                        Text(step.text, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
+                        Text('in ${_fmt(toStep)}', style: Theme.of(context).textTheme.bodyMedium),
+                        const SizedBox(height: 10),
+                      ],
+                      Row(children: [
+                        Text('${_fmt(rem)} left · $mins min'),
+                        const Spacer(),
+                        Text('Safety ${r.score}/100', style: TextStyle(color: _tier(r), fontWeight: FontWeight.w700)),
+                      ]),
+                      if (_demoMode) Text('Demo walk: simulated GPS', style: Theme.of(context).textTheme.bodySmall),
+                      const SizedBox(height: 8),
+                      Wrap(spacing: 8, children: [
+                        ActionChip(
+                            avatar: const Icon(Icons.share_location, size: 18),
+                            label: Text(_trip.active ? 'Stop sharing' : 'Share trip'),
+                            onPressed: _trip.active ? _stopSharing : _shareTrip),
+                        ActionChip(
+                            avatar: const Icon(Icons.local_police, size: 18),
+                            label: const Text('Safe place'),
+                            onPressed: _safePlace),
+                        ActionChip(
+                            avatar: const Icon(Icons.timer, size: 18),
+                            label: Text(gEnd == null ? 'Guardian timer' : "I'm safe · ${_mmss(gEnd.difference(DateTime.now()))}"),
+                            onPressed: gEnd == null ? _setGuardian : _cancelGuardian),
+                        ActionChip(
+                            avatar: Icon(_voice.enabled ? Icons.volume_up : Icons.volume_off, size: 18),
+                            label: const Text('Voice'),
+                            onPressed: () => setState(() => _voice.enabled = !_voice.enabled)),
+                        ActionChip(
+                            avatar: const Icon(Icons.explore, size: 18),
+                            label: Text(_headingUp ? 'Heading up' : 'North up'),
+                            onPressed: () {
+                              setState(() => _headingUp = !_headingUp);
+                              if (!_headingUp) _map.rotate(0);
+                            }),
+                      ]),
+                      const SizedBox(height: 8),
+                      Row(children: [
+                        Expanded(
+                            child: FilledButton.icon(
+                                style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                                onPressed: _stopNav,
+                                icon: const Icon(Icons.stop),
+                                label: const Text('Stop'))),
+                        const SizedBox(width: 8),
+                        OutlinedButton(onPressed: () => _openInGoogleMaps(r), child: const Text('Google Maps')),
+                      ]),
+                      if (_demoMode) TextButton(onPressed: _checkIn, child: const Text('Test safety check-in')),
+                    ])))));
   }
 
   Widget _panel(ScoredRoute r) {
@@ -645,62 +1019,80 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
     final fastest = _routes.reduce((a, b) => a.raw.durationS <= b.raw.durationS ? a : b);
     final extra = ((r.raw.durationS - fastest.raw.durationS) / 60).round();
     final f = r.factors;
+    final risk = _riskLine();
     return Material(
         elevation: 12,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(22)),
         child: SafeArea(
             top: false,
-            child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-                child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  SizedBox(
-                      height: 44,
-                      child: ListView(scrollDirection: Axis.horizontal, children: [
-                        for (final x in sorted)
-                          Padding(
-                              padding: const EdgeInsets.only(right: 8),
-                              child: ChoiceChip(
-                                  label: Text('${x.score} · ${(x.raw.durationS / 60).round()} min'),
-                                  selected: x.id == _selId,
-                                  selectedColor: _tier(x).withValues(alpha: .25),
-                                  onSelected: (_) {
-                                    setState(() => _selId = x.id);
-                                    _fit(x);
-                                  })),
-                      ])),
-                  const SizedBox(height: 8),
-                  Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                    Text('${r.score}', style: TextStyle(fontSize: 40, fontWeight: FontWeight.w800, color: _tier(r))),
-                    const Text(' / 100'),
-                    const Spacer(),
-                    Text('${(r.raw.distanceM / 1000).toStringAsFixed(1)} km · ${(r.raw.durationS / 60).round()} min${extra > 0 ? ' (+$extra)' : ''}'),
-                  ]),
-                  Text('Data confidence ${(r.confidence * 100).round()}%', style: Theme.of(context).textTheme.bodySmall),
-                  const SizedBox(height: 6),
-                  _bar('Lighting', f.lighting),
-                  _bar('Active places', f.activity),
-                  _bar('Help nearby', f.help),
-                  _bar('Community reviews', f.community),
-                  if (_advice.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_advice)),
-                  for (final n in r.notes) Text('• $n', style: Theme.of(context).textTheme.bodySmall),
-                  const SizedBox(height: 8),
-                  Row(children: [
-                    Expanded(
-                        child: FilledButton.icon(
-                            onPressed: _navigating ? null : _startNav,
-                            icon: const Icon(Icons.navigation),
-                            label: Text(_navigating ? 'Navigating…' : 'Start safe navigation'))),
-                    const SizedBox(width: 8),
-                    OutlinedButton(onPressed: _askDialog, child: const Text('Ask AI')),
-                  ]),
-                  Row(children: [
-                    const Text('Night'),
-                    Switch(value: _night, onChanged: (v) { _night = v; _rescore(); }),
-                    const Spacer(),
-                    TextButton(onPressed: () => _startNav(demo: true), child: const Text('Demo walk')),
-                    TextButton(onPressed: () => _reviewAt(_me), child: const Text('Review here')),
-                  ]),
-                ]))));
+            child: ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.62),
+                child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                    child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      SizedBox(
+                          height: 44,
+                          child: ListView(scrollDirection: Axis.horizontal, children: [
+                            for (final x in sorted)
+                              Padding(
+                                  padding: const EdgeInsets.only(right: 8),
+                                  child: ChoiceChip(
+                                      label: Text('${x.score} · ${(x.raw.durationS / 60).round()} min'),
+                                      selected: x.id == _selId,
+                                      selectedColor: _tier(x).withValues(alpha: .25),
+                                      onSelected: (_) {
+                                        setState(() => _selId = x.id);
+                                        _fit(x);
+                                      })),
+                          ])),
+                      const SizedBox(height: 8),
+                      Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                        Text('${r.score}', style: TextStyle(fontSize: 40, fontWeight: FontWeight.w800, color: _tier(r))),
+                        const Text(' / 100'),
+                        const Spacer(),
+                        Text('${(r.raw.distanceM / 1000).toStringAsFixed(1)} km · ${(r.raw.durationS / 60).round()} min${extra > 0 ? ' (+$extra)' : ''}'),
+                      ]),
+                      Text('Data confidence ${(r.confidence * 100).round()}%', style: Theme.of(context).textTheme.bodySmall),
+                      const SizedBox(height: 6),
+                      _bar('Lighting', f.lighting),
+                      _bar('Active places', f.activity),
+                      _bar('Help nearby', f.help),
+                      _bar('Community reviews', f.community),
+                      if (risk != null)
+                        Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Text(risk.$1,
+                                style: TextStyle(color: _tierColor(risk.$2 ? 20 : 80), fontWeight: FontWeight.w600))),
+                      if (_advice.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_advice)),
+                      for (final n in r.notes) Text('• $n', style: Theme.of(context).textTheme.bodySmall),
+                      const SizedBox(height: 8),
+                      Row(children: [
+                        Expanded(
+                            child: FilledButton.icon(
+                                onPressed: _navigating ? null : _startNav,
+                                icon: const Icon(Icons.navigation),
+                                label: Text(_navigating ? 'Navigating…' : 'Start safe navigation'))),
+                        const SizedBox(width: 8),
+                        OutlinedButton(onPressed: _askDialog, child: const Text('Ask AI')),
+                      ]),
+                      Row(children: [
+                        const Text('Night'),
+                        Switch(value: _night, onChanged: (v) { _night = v; _rescore(); }),
+                        const Spacer(),
+                        TextButton(onPressed: () => _startNav(demo: true), child: const Text('Demo walk')),
+                        TextButton(onPressed: () => _reviewAt(_me), child: const Text('Review here')),
+                      ]),
+                      Wrap(spacing: 8, children: [
+                        ActionChip(
+                            avatar: const Icon(Icons.share_location, size: 18),
+                            label: Text(_trip.active ? 'Stop sharing' : 'Share trip'),
+                            onPressed: _trip.active ? _stopSharing : _shareTrip),
+                        ActionChip(
+                            avatar: const Icon(Icons.timer, size: 18),
+                            label: Text(_guardianEnd == null ? 'Guardian timer' : "I'm safe · ${_mmss(_guardianEnd!.difference(DateTime.now()))}"),
+                            onPressed: _guardianEnd == null ? _setGuardian : _cancelGuardian),
+                      ]),
+                    ])))));
   }
 }
 
@@ -767,7 +1159,8 @@ class _ReviewFormState extends State<_ReviewForm> {
 }
 
 class _CheckInDialog extends StatefulWidget {
-  const _CheckInDialog();
+  final String reason;
+  const _CheckInDialog(this.reason);
   @override
   State<_CheckInDialog> createState() => _CheckInState();
 }
@@ -798,7 +1191,57 @@ class _CheckInState extends State<_CheckInDialog> {
   @override
   Widget build(BuildContext context) => AlertDialog(
         title: const Text('Are you okay?'),
-        content: Text('You stopped or left your route. With no reply in $left s, SafeNav opens your emergency options.'),
+        content: Text('${widget.reason} With no reply in $left s, SafeNav alerts your contacts.'),
         actions: [FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text("I'm okay"))],
       );
+}
+
+class _SosCountdown extends StatefulWidget {
+  const _SosCountdown();
+  @override
+  State<_SosCountdown> createState() => _SosCountdownState();
+}
+
+class _SosCountdownState extends State<_SosCountdown> {
+  int left = 5;
+  Timer? t;
+
+  @override
+  void initState() {
+    super.initState();
+    t = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (--left <= 0) {
+        t?.cancel();
+        Navigator.pop(context, true);
+      } else {
+        Voice.alert();
+        setState(() {});
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    t?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        backgroundColor: const Color(0xFFFFE9E9),
+        title: const Text('Sending SOS…', style: TextStyle(color: Colors.black87)),
+        content: Text('$left',
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 64, fontWeight: FontWeight.w800, color: Colors.red)),
+        actions: [FilledButton(onPressed: () => Navigator.pop(context, false), child: const Text("Cancel, I'm fine"))],
+      );
+}
+
+/// Compass bearing in degrees (0 = north) from a to b.
+double bearingDeg(LatLng a, LatLng b) {
+  double r(double d) => d * math.pi / 180;
+  final y = math.sin(r(b.longitude - a.longitude)) * math.cos(r(b.latitude));
+  final x = math.cos(r(a.latitude)) * math.sin(r(b.latitude)) -
+      math.sin(r(a.latitude)) * math.cos(r(b.latitude)) * math.cos(r(b.longitude - a.longitude));
+  return (math.atan2(y, x) * 180 / math.pi + 360) % 360;
 }
