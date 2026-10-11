@@ -754,8 +754,7 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
           children: [
             TileLayer(
                 urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                userAgentPackageName: 'com.example.safenav', // use your real application id
-                ),
+                userAgentPackageName: 'com.example.safenav'), // use your real application id
             PolylineLayer(polylines: [
               for (final r in _routes.where((r) => r.id != _selId))
                 Polyline(points: r.raw.points, strokeWidth: 5, color: _tier(r).withValues(alpha: .45)),

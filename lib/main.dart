@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 // import 'package:firebase_core/firebase_core.dart';
 // import 'firebase_options.dart';
 import 'theme/app_theme.dart';
-//import 'services/tile_cache.dart';
 import 'screens/splash_screen.dart';
 import 'screens/auth_screen.dart';
 import 'screens/destination_screen.dart';
@@ -21,7 +20,6 @@ import 'screens/database_update_screen.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-  // keeps map tiles you have viewed, for weak-signal areas
   runApp(const AISafeRouteFinderApp());
 }
 
