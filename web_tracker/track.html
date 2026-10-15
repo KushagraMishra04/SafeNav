@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SafeNav Live Trip Tracker</title>
+  <!-- Leaflet Map CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <!-- Google Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: 'Plus Jakarta Sans', -apple-system, sans-serif;
+    }
+    body {
+      background: #0f172a;
+      color: #f8fafc;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    header {
+      background: #1e293b;
+      padding: 14px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid #334155;
+      z-index: 1000;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .brand-icon {
+      background: #2563eb;
+      color: white;
+      width: 34px;
+      height: 34px;
+      border-radius: 9px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 18px;
+    }
+    .brand h1 {
+      font-size: 18px;
+      font-weight: 700;
+      color: white;
+      letter-spacing: -0.3px;
+    }
+    .live-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid #10b981;
+      color: #34d399;
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .live-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #10b981;
+      box-shadow: 0 0 8px #10b981;
+      animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+      0% { transform: scale(0.9); opacity: 0.7; }
+      50% { transform: scale(1.3); opacity: 1; }
+      100% { transform: scale(0.9); opacity: 0.7; }
+    }
+    #map {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+    }
+    .card {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      right: 20px;
+      max-width: 440px;
+      margin: 0 auto;
+      background: rgba(30, 41, 59, 0.95);
+      backdrop-filter: blur(12px);
+      border: 1px solid #334155;
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+      z-index: 1000;
+      transition: all 0.3s ease;
+    }
+    .sos-active {
+      border: 2px solid #ef4444;
+      background: rgba(69, 10, 10, 0.95);
+      animation: sos-pulse 2s infinite;
+    }
+    @keyframes sos-pulse {
+      0%, 100% { box-shadow: 0 0 20px rgba(239, 68, 68, 0.5); }
+      50% { box-shadow: 0 0 35px rgba(239, 68, 68, 0.9); }
+    }
+    .status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .status-title {
+      font-size: 16px;
+      font-weight: 700;
+    }
+    .status-chip {
+      padding: 4px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .chip-walking { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid #3b82f6; }
+    .chip-sos { background: rgba(239, 68, 68, 0.3); color: #f87171; border: 1px solid #ef4444; }
+    .chip-arrived { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #10b981; }
+    .detail-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .detail-box {
+      background: rgba(15, 23, 42, 0.6);
+      padding: 10px;
+      border-radius: 10px;
+      border: 1px solid #334155;
+    }
+    .detail-box span {
+      display: block;
+      font-size: 11px;
+      color: #94a3b8;
+      margin-bottom: 3px;
+    }
+    .detail-box strong {
+      font-size: 14px;
+      color: white;
+    }
+    .action-btn {
+      width: 100%;
+      background: #ef4444;
+      color: white;
+      text-decoration: none;
+      padding: 12px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 14px;
+      gap: 8px;
+    }
+    .pulse-marker {
+      background: #2563eb;
+      border: 3px solid white;
+      border-radius: 50%;
+      width: 20px;
+      height: 20px;
+      box-shadow: 0 0 14px rgba(37, 99, 235, 0.8);
+    }
+    .pulse-marker.sos {
+      background: #ef4444;
+      box-shadow: 0 0 20px #ef4444;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="brand-icon">🛡️</div>
+      <h1>SafeNav Live Tracker</h1>
+    </div>
+    <div class="live-badge" id="liveBadge">
+      <div class="live-dot" id="liveDot"></div>
+      <span id="liveText">LIVE</span>
+    </div>
+  </header>
+
+  <div id="map"></div>
+
+  <div class="card" id="statusCard">
+    <div class="status-row">
+      <div class="status-title" id="userName">Tracking SafeNav User</div>
+      <div class="status-chip chip-walking" id="statusChip">Walking</div>
+    </div>
+    <div class="detail-grid">
+      <div class="detail-box">
+        <span>Destination</span>
+        <strong id="destText">Loading…</strong>
+      </div>
+      <div class="detail-box">
+        <span>Estimated Time</span>
+        <strong id="etaText">Calculating…</strong>
+      </div>
+    </div>
+    <div id="alertBanner" style="display:none; color: #f87171; font-size: 13px; margin-bottom: 12px; font-weight: 600;">
+      ⚠️ Emergency SOS triggered! Contacts notified.
+    </div>
+    <a href="tel:112" class="action-btn" id="callBtn">
+      📞 Call Emergency (112)
+    </a>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- Firebase JS SDK (v10 modular via unpkg) -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-app.js";
+    import { getFirestore, doc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-firestore.js";
+
+    // Firebase Config for SafeNav (matches safenav-4b482)
+    const firebaseConfig = {
+      apiKey: "AIzaSyD7pC-V4ayzoZMcKRHQN5JJhoiD-UtNJEc",
+      projectId: "safenav-4b482",
+      appId: "1:638670975460:android:f0f1265d26972e838cd7f1"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    // Parse URL params
+    const urlParams = new URLSearchParams(window.location.search);
+    const tripId = urlParams.get('t');
+
+    // Initialize Map
+    const map = L.map('map', { zoomControl: false }).setView([20.5937, 78.9629], 5);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    let userMarker = null;
+
+    if (!tripId) {
+      document.getElementById('destText').innerText = "No trip ID provided";
+      document.getElementById('etaText').innerText = "Invalid Link";
+      document.getElementById('statusChip').innerText = "Inactive";
+    } else {
+      // Listen to trip in real time
+      const tripRef = doc(db, "trips", tripId);
+      onSnapshot(tripRef, (docSnap) => {
+        if (!docSnap.exists()) {
+          document.getElementById('destText').innerText = "Trip expired or ended";
+          document.getElementById('etaText').innerText = "--";
+          document.getElementById('statusChip').innerText = "Expired";
+          document.getElementById('liveText').innerText = "OFFLINE";
+          document.getElementById('liveDot').style.background = "#94a3b8";
+          return;
+        }
+
+        const data = docSnap.data();
+        const lat = data.lat;
+        const lng = data.lng;
+        const status = data.status || 'walking';
+        const dest = data.dest || 'Destination';
+        const eta = data.etaMin ? `${data.etaMin} mins` : 'Arriving soon';
+
+        document.getElementById('destText').innerText = dest;
+        document.getElementById('etaText').innerText = eta;
+
+        const chip = document.getElementById('statusChip');
+        const card = document.getElementById('statusCard');
+        const alertBanner = document.getElementById('alertBanner');
+
+        if (status === 'sos') {
+          chip.className = 'status-chip chip-sos';
+          chip.innerText = 'EMERGENCY SOS';
+          card.classList.add('sos-active');
+          alertBanner.style.display = 'block';
+        } else if (status === 'arrived') {
+          chip.className = 'status-chip chip-arrived';
+          chip.innerText = 'Arrived Safely';
+          card.classList.remove('sos-active');
+          alertBanner.style.display = 'none';
+        } else {
+          chip.className = 'status-chip chip-walking';
+          chip.innerText = 'Walking safely';
+          card.classList.remove('sos-active');
+          alertBanner.style.display = 'none';
+        }
+
+        if (lat && lng) {
+          const pos = [lat, lng];
+          if (!userMarker) {
+            const icon = L.divIcon({
+              className: status === 'sos' ? 'pulse-marker sos' : 'pulse-marker',
+              iconSize: [20, 20]
+            });
+            userMarker = L.marker(pos, { icon }).addTo(map);
+            map.setView(pos, 16);
+          } else {
+            userMarker.setLatLng(pos);
+            map.panTo(pos);
+          }
+        }
+      }, (err) => {
+        console.error("Tracker subscription error:", err);
+      });
+    }
+  </script>
+</body>
+</html>

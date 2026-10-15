@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "638670975460",
+    "project_id": "safenav-4b482",
+    "storage_bucket": "safenav-4b482.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:638670975460:android:f0f1265d26972e838cd7f1",
+        "android_client_info": {
+          "package_name": "com.example.ai_safe_route_finder"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "638670975460-4ffla6r7bv4pa45l5uqbjltbaj8q6lvo.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD7pC-V4ayzoZMcKRHQN5JJhoiD-UtNJEc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "638670975460-4ffla6r7bv4pa45l5uqbjltbaj8q6lvo.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

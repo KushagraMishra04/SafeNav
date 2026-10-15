@@ -1,0 +1,63 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isAuthenticated() && request.auth.uid == uid;
+    }
+
+    // 1. Users collection: Users can only read and write their own profile
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+    }
+
+    // 2. Trusted Contacts: Users can only manage their own contacts
+    match /trusted_contacts/{contactId} {
+      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
+      allow read, update, delete: if isAuthenticated() && resource.data.uid == request.auth.uid;
+    }
+
+    // 3. Trips: Live location sharing with strict privacy & automatic expiry
+    match /trips/{tripId} {
+      // Owner can write, update, and end the trip
+      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
+      allow update, delete: if isAuthenticated() && resource.data.uid == request.auth.uid;
+
+      // Contacts can read only while the trip is actively walking and before expiry
+      allow read: if (isAuthenticated() && resource.data.uid == request.auth.uid) ||
+                     (resource.data.expiresAt > request.time && resource.data.status != 'arrived');
+    }
+
+    // 4. Community Safety Reports: Verified reports from users
+    match /safety_reports/{reportId} {
+      // Authenticated users can submit a report with valid data
+      allow create: if isAuthenticated() &&
+                       request.resource.data.uid == request.auth.uid &&
+                       request.resource.data.rating >= 1 &&
+                       request.resource.data.rating <= 5;
+      
+      // Community reports are readable by all authenticated users to compute safety scores
+      allow read: if isAuthenticated();
+
+      // Only the author can delete their own report
+      allow update, delete: if isAuthenticated() && resource.data.uid == request.auth.uid;
+    }
+
+    // 5. SOS Events: Emergency audit trail
+    match /sos_events/{eventId} {
+      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
+      allow read, update: if isAuthenticated() && resource.data.uid == request.auth.uid;
+    }
+
+    // 6. Areas: Aggregated safety scores computed by the SafeNav Guardian service
+    match /areas/{areaId} {
+      allow read: if true;
+      allow write: if false; // Only updated by server backend / Cloud Functions
+    }
+  }
+}

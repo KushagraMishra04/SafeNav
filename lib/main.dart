@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
-// After you run `flutterfire configure`, uncomment these two imports and the
-// Firebase.initializeApp line inside main():
-// import 'package:firebase_core/firebase_core.dart';
-// import 'firebase_options.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'firebase_options.dart';
 import 'theme/app_theme.dart';
 import 'screens/splash_screen.dart';
 import 'screens/auth_screen.dart';
@@ -16,10 +14,20 @@ import 'screens/route_map_screen.dart';
 import 'screens/journey_end_screen.dart';
 import 'screens/feedback_screen.dart';
 import 'screens/database_update_screen.dart';
+import 'screens/guardian_chat_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+  } catch (_) {
+    // If Firebase configuration is missing, app runs safely with on-device features
+    try {
+      await Firebase.initializeApp();
+    } catch (_) {}
+  }
   runApp(const AISafeRouteFinderApp());
 }
 
@@ -37,13 +45,12 @@ class AISafeRouteFinderApp extends StatelessWidget {
         '/': (context) => const SplashScreen(),
         '/auth': (context) => const AuthScreen(),
 
-        // The real map replaces the old destination -> data collection -> AI analysis ->
-        // route check -> navigation -> SOS steps. Anything that opens '/destination'
-        // (your sign-in screen) now lands on the live map.
+        // Real map replaces old flow
         '/destination': (context) => const RouteMapScreen(),
         '/map': (context) => const RouteMapScreen(),
+        '/guardian': (context) => const GuardianChatScreen(),
 
-        // Old demo screens, kept so nothing is lost and imports stay valid.
+        // Demo screens from flowchart
         '/old/destination': (context) => const DestinationScreen(),
         '/collection': (context) => const SafetyCollectionScreen(),
         '/analysis': (context) => const AIAnalysisScreen(),

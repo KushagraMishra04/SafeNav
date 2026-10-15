@@ -1,0 +1,12 @@
+{
+  "message": "I am alone and it is dark, keep me on busy streets",
+  "night": true,
+  "routes": [
+    {"id": "r0", "minutes": 11, "km": 0.8, "score": 53, "confidence": 0.35,
+     "factors": {"lighting": null, "activity": 0.36, "help": 0.66, "community": null},
+     "notes": ["Street-light data is sparse here, so lighting was not scored."]},
+    {"id": "r1", "minutes": 15, "km": 1.1, "score": 51, "confidence": 0.35,
+     "factors": {"lighting": null, "activity": 0.55, "help": 0.30, "community": null},
+     "notes": []}
+  ]
+}

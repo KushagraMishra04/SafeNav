@@ -36,19 +36,25 @@ class _FeedbackScreenState extends State<FeedbackScreen> {
                             color: AppColors.navy,
                             fontSize: 16)),
                     const SizedBox(height: 16),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: List.generate(5, (i) {
-                        final filled = i < _rating;
-                        return IconButton(
-                          iconSize: 36,
-                          onPressed: () => setState(() => _rating = i + 1),
-                          icon: Icon(
-                            filled ? Icons.star_rounded : Icons.star_border_rounded,
-                            color: AppColors.orange,
-                          ),
-                        );
-                      }),
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: List.generate(5, (i) {
+                          final filled = i < _rating;
+                          return IconButton(
+                            visualDensity: VisualDensity.compact,
+                            constraints: const BoxConstraints(),
+                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+                            iconSize: 36,
+                            onPressed: () => setState(() => _rating = i + 1),
+                            icon: Icon(
+                              filled ? Icons.star_rounded : Icons.star_border_rounded,
+                              color: AppColors.orange,
+                            ),
+                          );
+                        }),
+                      ),
                     ),
                     const SizedBox(height: 8),
                     Text(

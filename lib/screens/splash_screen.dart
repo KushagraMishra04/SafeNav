@@ -7,61 +7,55 @@ class SplashScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppColors.purple,
+      backgroundColor: Colors.white,
       body: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 28),
+          padding: const EdgeInsets.fromLTRB(28, 24, 28, 28),
           child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
             children: [
+              const Spacer(flex: 2),
               Container(
-                width: 120,
-                height: 120,
+                width: 104,
+                height: 104,
                 decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.15),
-                  shape: BoxShape.circle,
+                  color: AppColors.blueLight,
+                  borderRadius: BorderRadius.circular(28),
                 ),
-                child: Image.asset('assets/logo.jpeg', width: 64, height: 64),
-              ),
-              const SizedBox(height: 28),
-              const Text(
-                'SafeNav',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 30,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: 0.5,
-                ),
-              ),
-              const SizedBox(height: 10),
-              const Text(
-                'SAFE  •  SMART  •  TOGETHER',
-                style: TextStyle(
-                  color: Colors.white70,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 2,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    const Icon(Icons.location_on_outlined, color: AppColors.blue, size: 78),
+                    Positioned(
+                      top: 27,
+                      child: Container(
+                        width: 34,
+                        height: 34,
+                        decoration: const BoxDecoration(
+                          color: AppColors.blueLight,
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(Icons.shield_outlined, color: AppColors.blue, size: 28),
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(height: 56),
+              const SizedBox(height: 22),
+              const Text('SafeNav', style: TextStyle(fontSize: 34, fontWeight: FontWeight.w700, color: AppColors.navy)),
+              const SizedBox(height: 8),
+              const Text('Travel safe, not just fast.', textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 16, color: AppColors.muted)),
+              const Spacer(flex: 2),
               SizedBox(
                 width: double.infinity,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: AppColors.purple,
-                  ),
-                  onPressed: () =>
-                      Navigator.pushNamed(context, '/auth'),
-                  child: const Text('Get Started'),
+                child: ElevatedButton.icon(
+                  onPressed: () => Navigator.pushNamed(context, '/auth'),
+                  icon: const Icon(Icons.arrow_forward_rounded),
+                  label: const Text('Get started'),
                 ),
               ),
               const SizedBox(height: 14),
-              const Text(
-                'SIH Prototype — Team Demo Build',
-                style: TextStyle(color: Colors.white54, fontSize: 12),
-              ),
+              const Text('Safer routes. Connected journeys.', style: TextStyle(fontSize: 12, color: AppColors.muted)),
             ],
           ),
         ),

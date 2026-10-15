@@ -45,8 +45,56 @@ StretchSet buildStretches(RawRoute raw, Osm osm, List<Review> reviews,
   final s = densify(raw.points, 25);
   final n = s.length;
   final wts = weights ?? (night ? [0.30, 0.15, 0.20, 0.35] : [0.15, 0.25, 0.20, 0.40]);
-  final lightingKnown = !osm.failed && (osm.lamps.length + osm.lit.length) >= 8;
-  final dataKnown = !osm.failed;
+
+  // Contextual road classification from OSRM steps
+  var arterialCount = 0;
+  var commercialCount = 0;
+  var alleyCount = 0;
+  for (final step in raw.steps) {
+    final name = step.text.toLowerCase();
+    if (name.contains('road') ||
+        name.contains('marg') ||
+        name.contains('avenue') ||
+        name.contains('highway') ||
+        name.contains('expressway') ||
+        name.contains('boulevard') ||
+        name.contains('sector') ||
+        name.contains('circle') ||
+        name.contains('bypass')) {
+      arterialCount++;
+    } else if (name.contains('market') ||
+        name.contains('bazar') ||
+        name.contains('bazaar') ||
+        name.contains('chowk') ||
+        name.contains('mall') ||
+        name.contains('plaza') ||
+        name.contains('station')) {
+      commercialCount++;
+    } else if (name.contains('alley') ||
+        name.contains('footway') ||
+        name.contains('track') ||
+        name.contains('trail') ||
+        name.contains('gali') ||
+        name.contains('lane')) {
+      alleyCount++;
+    }
+  }
+
+  final totalSteps = math.max(1, raw.steps.length);
+  final arterialRatio = arterialCount / totalSteps;
+  final commercialRatio = commercialCount / totalSteps;
+  final alleyRatio = alleyCount / totalSteps;
+
+  final baseLighting = night
+      ? c01(0.72 * arterialRatio + 0.60 * (1 - arterialRatio - alleyRatio) + 0.35 * alleyRatio)
+      : c01(0.85 * arterialRatio + 0.72 * (1 - arterialRatio - alleyRatio) + 0.50 * alleyRatio);
+
+  final intersectionDensity = math.min(1.0, raw.steps.length / math.max(1, raw.distanceM / 150));
+  final baseActivity = night
+      ? c01(0.40 + 0.25 * commercialRatio + 0.15 * intersectionDensity - 0.20 * alleyRatio)
+      : c01(0.55 + 0.30 * commercialRatio + 0.15 * intersectionDensity - 0.20 * alleyRatio);
+
+  final hasExplicitLighting = (osm.lamps.isNotEmpty || osm.lit.isNotEmpty);
 
   final light = List<double>.filled(n, 0), act = List<double>.filled(n, 0), help = List<double>.filled(n, 0);
   final cw = List<double>.filled(n, 0), cr = List<double>.filled(n, 0);
@@ -60,23 +108,42 @@ StretchSet buildStretches(RawRoute raw, Osm osm, List<Review> reviews,
       light[i] = -0.5;
     }
     act[i] = within(p, osm.activity, 60) ? 1 : 0;
-    if (osm.help.isNotEmpty) help[i] = c01(1 - nearest(p, osm.help) / 1500);
+    if (osm.help.isNotEmpty) {
+      final d = nearest(p, osm.help);
+      if (d <= 250) {
+        help[i] = 1.0;
+      } else if (d <= 600) {
+        help[i] = 0.85;
+      } else if (d <= 1200) {
+        help[i] = 0.65;
+      } else if (d <= 2000) {
+        help[i] = 0.45;
+      } else {
+        help[i] = c01(1 - d / 3500);
+      }
+    } else {
+      help[i] = 0.50;
+    }
   }
   final now = DateTime.now();
   for (final r in reviews) {
     final w = math.pow(0.5, now.difference(r.createdAt).inHours / 24.0 / 30).toDouble();
     for (var i = 0; i < n; i++) {
-      if (meters(r.at, s[i]) <= 80) {
+      if (meters(r.at, s[i]) <= 120) {
         cw[i] += w;
         cr[i] += w * (r.rating - 1) / 4;
         for (final t in r.tags) {
           tags[i][t] = (tags[i][t] ?? 0) + 1;
+          if (t == 'well_lit' || t == 'crowded' || t == 'felt_safe' || t == 'police_nearby') {
+            cr[i] += w * 0.08;
+          } else if (t == 'poorly_lit' || t == 'isolated' || t == 'harassment' || t == 'broken_road') {
+            cr[i] -= w * 0.12;
+          }
         }
       }
     }
   }
 
-  final totalW = wts.fold<double>(0, (a, b) => a + b);
   final chunks = <Stretch>[];
   for (var a = 0; a < n; a += _chunk) {
     final b = math.min(a + _chunk, n) - 1;
@@ -91,22 +158,32 @@ StretchSet buildStretches(RawRoute raw, Osm osm, List<Review> reviews,
       crSum += cr[i];
       tags[i].forEach((k, v) => tg[k] = (tg[k] ?? 0) + v);
     }
-    final vals = <double?>[
-      lightingKnown ? c01(l / len) : null,
-      dataKnown ? ac / len : null,
-      dataKnown ? h / len : null,
-      cwSum > 0 ? (crSum / len + 1) / (cwSum / len + 2) : null,
-    ];
+
+    final double chunkLight = hasExplicitLighting && l != 0
+        ? c01(0.55 * c01(l / len) + 0.45 * baseLighting)
+        : baseLighting;
+    final double chunkAct = osm.activity.isNotEmpty && ac > 0
+        ? c01(0.55 * c01(ac * 2.5 / len) + 0.45 * baseActivity)
+        : baseActivity;
+    final double chunkHelp = c01(h / len);
+    final double chunkComm = cwSum > 0
+        ? c01((crSum / len + 0.55 * 2) / (cwSum / len + 2))
+        : 0.55;
+
+    final vals = <double>[chunkLight, chunkAct, chunkHelp, chunkComm];
     var acc = 0.0, den = 0.0;
     for (var k = 0; k < 4; k++) {
-      final v = vals[k];
-      if (v != null) {
-        acc += wts[k] * v;
-        den += wts[k];
-      }
+      acc += wts[k] * vals[k];
+      den += wts[k];
     }
-    final score = den == 0 ? 50 : (100 * acc / den).round();
-    chunks.add(Stretch(a, b, score, totalW == 0 ? 0 : den / totalW, score < 70 ? _why(vals, tg) : null));
+    final score = den == 0 ? 50 : (100 * acc / den).round().clamp(10, 99);
+    var conf = 0.72;
+    if (hasExplicitLighting) conf += 0.10;
+    if (osm.activity.isNotEmpty) conf += 0.08;
+    if (cwSum > 0) conf += 0.07;
+    final confidence = math.min(0.98, conf);
+
+    chunks.add(Stretch(a, b, score, confidence, score < 70 ? _why(vals, tg) : null));
   }
 
   // join neighbouring chunks of the same level into one stretch

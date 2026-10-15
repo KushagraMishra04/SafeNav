@@ -11,6 +11,12 @@ const reviewTags = [
   'harassment', 'police_nearby', 'broken_road',
 ];
 
+/// Thrown when this person already reported this spot today.
+class AlreadyReported implements Exception {
+  @override
+  String toString() => 'already reported';
+}
+
 /// Reviews go to Firestore when it is set up. If Firebase is missing or offline, they are
 /// saved on this device instead, so the demo keeps working. Writes return true when the
 /// review reached the cloud, false when it was saved on the device only.
@@ -43,6 +49,7 @@ class ReviewService {
     const pad = 0.001;
     final out = <Review>[];
     try {
+      await _user().timeout(_wait); // reading needs a signed-in (anonymous) user, so sign in first
       // Firestore allows one range field: filter latitude there, longitude on the device.
       final snap = await _col
           .where('lat', isGreaterThanOrEqualTo: s - pad)
@@ -92,11 +99,37 @@ class ReviewService {
         'createdAt': FieldValue.serverTimestamp(),
       };
 
+  String _day() {
+    final n = DateTime.now().toUtc();
+    return '${n.year}${n.month.toString().padLeft(2, '0')}${n.day.toString().padLeft(2, '0')}';
+  }
+
+  /// One report per person, per ~110 m cell, per day and kind. The document id is built from
+  /// these, so repeated taps cannot flood the database (the security rules refuse an update).
+  String _id(User u, LatLng p, String kind) =>
+      '${u.uid}_${(p.latitude * 1000).round()}_${(p.longitude * 1000).round()}_${_day()}_$kind';
+
+  Future<bool> _exists(String id) async {
+    try {
+      return (await _col.doc(id).get().timeout(_wait)).exists;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Returns true when saved to the cloud, false when saved on this device only.
+  /// Throws [AlreadyReported] for a repeat report of the same spot on the same day.
   Future<bool> addAt(LatLng at, int rating, List<String> tags, String text, String tripId) async {
+    String? id;
     try {
       final u = await _user().timeout(_wait);
-      await _col.add(_doc(u, at, rating, tags, text, tripId, 'spot')).timeout(_wait);
+      id = _id(u, at, 'spot');
+      await _col.doc(id).set(_doc(u, at, rating, tags, text, tripId, 'spot')).timeout(_wait);
       return true;
+    } on FirebaseException catch (e) {
+      if (e.code == 'permission-denied' && id != null && await _exists(id)) throw AlreadyReported();
+      await _saveLocal([Review(at, rating, tags.take(8).toList(), _clip(text), DateTime.now())]);
+      return false;
     } catch (_) {
       await _saveLocal([Review(at, rating, tags.take(8).toList(), _clip(text), DateTime.now())]);
       return false;
@@ -118,8 +151,10 @@ class ReviewService {
     try {
       final u = await _user().timeout(_wait);
       final batch = FirebaseFirestore.instance.batch();
+      final seen = <String>{};
       for (final p in spots) {
-        batch.set(_col.doc(), _doc(u, p, rating, tags, text, tripId, 'trip'));
+        final id = _id(u, p, 'trip');
+        if (seen.add(id)) batch.set(_col.doc(id), _doc(u, p, rating, tags, text, tripId, 'trip'));
       }
       await batch.commit().timeout(_wait);
       return true;

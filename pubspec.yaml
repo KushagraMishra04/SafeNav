@@ -22,8 +22,10 @@ dependencies:
   wakelock_plus: ^1.8.0
   sensors_plus: ^7.1.1
   flutter_tts: ^4.2.5
-  telephony_sms: ^0.1.0
+  another_telephony: ^0.4.1
   flutter_phone_direct_caller: ^2.2.1
+  battery_plus: ^7.1.2
+  google_sign_in: ^6.2.2
 
 dev_dependencies:
   flutter_test:
