@@ -322,4 +322,37 @@ class Sos {
 
   static Future<void> sms(List<String> contacts, String body) =>
       launchUrl(Uri.parse('sms:${contacts.join(',')}?body=${Uri.encodeComponent(body)}'));
+
+  /// Directly sends SMS to emergency number 112 (ERSS India)
+  static Future<bool> sms112(String body) =>
+      launchUrl(Uri.parse('sms:112?body=${Uri.encodeComponent(body)}'));
+
+  /// Formats an official ERSS 112 Live Tracking and Emergency Dispatch message
+  static String formatPoliceLiveDispatch({
+    required String userName,
+    required double lat,
+    required double lng,
+    String? liveTrackUrl,
+    String? dest,
+    int? etaMin,
+    String? nearestPoliceStation,
+  }) {
+    final who = userName.trim().isEmpty ? 'SafeNav User' : userName.trim();
+    final b = StringBuffer('EMERGENCY LIVE LOCATION DISPATCH - ERSS 112:\n');
+    b.write('User: $who\n');
+    b.write('Current GPS: https://maps.google.com/?q=${lat.toStringAsFixed(6)},${lng.toStringAsFixed(6)}\n');
+    if (liveTrackUrl != null && liveTrackUrl.isNotEmpty) {
+      b.write('Live Track Link: $liveTrackUrl\n');
+    }
+    if (dest != null && dest.isNotEmpty) {
+      b.write('En route to: $dest');
+      if (etaMin != null && etaMin > 0) b.write(' (ETA: ~$etaMin min)');
+      b.write('\n');
+    }
+    if (nearestPoliceStation != null && nearestPoliceStation.isNotEmpty) {
+      b.write('Nearest Station: $nearestPoliceStation\n');
+    }
+    b.write('Status: Live tracking enabled. Please monitor or dispatch nearest patrol unit.');
+    return b.toString();
+  }
 }

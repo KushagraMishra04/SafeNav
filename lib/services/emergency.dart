@@ -24,4 +24,14 @@ class Emergency {
   }
 
   static Future<bool> dial(String number) => launchUrl(Uri.parse('tel:$number'));
+
+  /// Open SMS app directly addressed to emergency number (e.g. 112) with prefilled message
+  static Future<bool> sendSms(String number, String message) async {
+    try {
+      final uri = Uri.parse('sms:$number?body=${Uri.encodeComponent(message)}');
+      return await launchUrl(uri);
+    } catch (_) {
+      return false;
+    }
+  }
 }

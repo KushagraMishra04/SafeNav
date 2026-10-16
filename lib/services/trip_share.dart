@@ -34,6 +34,8 @@ class TripShare {
     required String dest,
     required int etaMin,
     DateTime? guardianEnd,
+    bool alertPolice = false,
+    String? nearestPolice,
   }) async {
     try {
       final auth = FirebaseAuth.instance;
@@ -49,6 +51,8 @@ class TripShare {
         'etaMin': etaMin,
         'status': 'walking',
         'guardianEnd': guardianEnd?.millisecondsSinceEpoch,
+        'alertPolice': alertPolice,
+        if (nearestPolice != null) 'nearestPolice': nearestPolice,
         'startedAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
         // TTL policy: old trips delete themselves after 12 hours for privacy
@@ -62,6 +66,17 @@ class TripShare {
       shareToken = null;
       return false;
     }
+  }
+
+  Future<void> setPoliceAlert({required bool alerted, String? nearestPolice}) async {
+    if (id == null) return;
+    try {
+      await _doc.update({
+        'alertPolice': alerted,
+        if (nearestPolice != null) 'nearestPolice': nearestPolice,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }).timeout(_wait);
+    } catch (_) {}
   }
 
   Future<void> update(LatLng at, {int? etaMin, String? dest, bool force = false}) async {

@@ -210,6 +210,9 @@
         <strong id="etaText">Calculating…</strong>
       </div>
     </div>
+    <div id="policeBadge" style="display:none; background: rgba(30, 58, 138, 0.45); border: 1px solid #3b82f6; border-radius: 10px; padding: 8px 12px; margin-bottom: 12px; font-size: 12px; color: #93c5fd;">
+      🚓 <strong>Authorities Alerted:</strong> <span id="policeName">ERSS 112 & Nearest Police</span>
+    </div>
     <div id="alertBanner" style="display:none; color: #f87171; font-size: 13px; margin-bottom: 12px; font-weight: 600;">
       ⚠️ Emergency SOS triggered! Contacts notified.
     </div>
@@ -278,6 +281,17 @@
         const chip = document.getElementById('statusChip');
         const card = document.getElementById('statusCard');
         const alertBanner = document.getElementById('alertBanner');
+        const policeBadge = document.getElementById('policeBadge');
+        const policeName = document.getElementById('policeName');
+
+        if (data.alertPolice || data.nearestPolice) {
+          policeBadge.style.display = 'block';
+          if (data.nearestPolice) {
+            policeName.innerText = data.nearestPolice;
+          }
+        } else {
+          policeBadge.style.display = 'none';
+        }
 
         if (status === 'sos') {
           chip.className = 'status-chip chip-sos';

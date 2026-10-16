@@ -1190,41 +1190,317 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
   // ---------- shake to SOS ----------
   void _onShake() => _sosCountdown(); // works any time this screen is open; 5-second cancel countdown
 
-  // ---------- live trip sharing ----------
+  // ---------- live trip sharing & authorities dispatch ----------
   Future<void> _shareTrip() async {
-    if (_contacts.isEmpty) {
-      _toast('Add emergency contacts first.');
-      await _editContacts();
-      if (_contacts.isEmpty) return;
+    final at = _me;
+    if (at == null) {
+      _toast('Waiting for your GPS location. Please wait a moment and try again.');
+      return;
     }
+
+    // Resolve nearest police station in background or from route data
+    String? policeName;
+    try {
+      final policePlaces = await _engine.nearbyPlaces(at, 'police');
+      if (policePlaces.isNotEmpty) {
+        policeName = policePlaces.first.name;
+      }
+    } catch (_) {
+      final help = _nearestHelp(at);
+      if (help != null) {
+        policeName = 'Nearest Emergency Haven (${_fmt(help.$2)})';
+      }
+    }
+
     if (!mounted) return;
-    final ok = await showDialog<bool>(
+
+    var shareWithContacts = _contacts.isNotEmpty;
+    var shareWithPolice = false;
+
+    final confirmed = await showModalBottomSheet<bool>(
       context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Share this trip?'),
-        content: const Text('Your contacts get a link that shows your live location and ETA until you arrive or stop sharing.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Share')),
-        ],
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) {
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: AppColors.blue.withOpacity(0.12),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(Icons.share_location_rounded, color: AppColors.blue),
+                      ),
+                      const SizedBox(width: 14),
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Live Location Sharing',
+                                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.navy)),
+                            SizedBox(height: 2),
+                            Text('Share real-time tracking with contacts & authorities',
+                                style: TextStyle(fontSize: 13, color: Colors.grey)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  if (policeName != null)
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.blue.shade50,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.blue.shade200),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.local_police, color: AppColors.blue, size: 22),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text('Nearby Police Authority (Overpass / ERSS)',
+                                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.blue)),
+                                Text(policeName,
+                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.navy),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis),
+                              ],
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: AppColors.blue,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: const Text('112 ERSS',
+                                style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
+                          ),
+                        ],
+                      ),
+                    ),
+                  const SizedBox(height: 14),
+                  CheckboxListTile(
+                    value: shareWithContacts,
+                    onChanged: (val) {
+                      if (_contacts.isEmpty) {
+                        Navigator.pop(ctx);
+                        _editContacts();
+                        return;
+                      }
+                      setModalState(() => shareWithContacts = val ?? false);
+                    },
+                    title: const Text('Share with Trusted Contacts',
+                        style: TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+                    subtitle: Text(
+                      _contacts.isEmpty
+                          ? 'No contacts saved yet (tap to add)'
+                          : 'Sends live link to ${_contacts.length} saved contact(s)',
+                      style: TextStyle(fontSize: 12, color: _contacts.isEmpty ? Colors.red : Colors.grey.shade600),
+                    ),
+                    controlAffinity: ListTileControlAffinity.leading,
+                    contentPadding: EdgeInsets.zero,
+                    activeColor: AppColors.blue,
+                  ),
+                  CheckboxListTile(
+                    value: shareWithPolice,
+                    onChanged: (val) {
+                      setModalState(() => shareWithPolice = val ?? false);
+                    },
+                    title: const Text('Alert & Share with Police (ERSS 112)',
+                        style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15, color: AppColors.navy)),
+                    subtitle: const Text(
+                      'Dispatches live tracking link & GPS coordinates via SMS to 112 and nearest police station',
+                      style: TextStyle(fontSize: 12, color: Colors.black54),
+                    ),
+                    controlAffinity: ListTileControlAffinity.leading,
+                    contentPadding: EdgeInsets.zero,
+                    activeColor: Colors.red,
+                  ),
+                  const SizedBox(height: 16),
+                  FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: shareWithPolice ? Colors.red.shade700 : AppColors.blue,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                    onPressed: (!shareWithContacts && !shareWithPolice)
+                        ? null
+                        : () => Navigator.pop(ctx, true),
+                    icon: Icon(shareWithPolice ? Icons.emergency_share : Icons.share),
+                    label: Text(
+                      shareWithPolice
+                          ? 'Start & Dispatch to Police (112)'
+                          : 'Start Live Trip Sharing',
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
       ),
     );
-    final at = _me;
-    if (ok != true || at == null || !mounted) return;
+
+    if (confirmed != true || !mounted) return;
+
     final dest = _dest?.name ?? 'my destination';
     final r = _sel;
     final eta = r == null ? 0 : (r.raw.durationS / 60).ceil();
-    final live = await _trip.start(at: at, dest: dest, etaMin: eta, guardianEnd: _guardianEnd);
+
+    final live = await _trip.start(
+      at: at,
+      dest: dest,
+      etaMin: eta,
+      guardianEnd: _guardianEnd,
+      alertPolice: shareWithPolice,
+      nearestPolice: policeName,
+    );
     if (!mounted) return;
     final link = _trip.link;
-    if (live && link != null) {
-      await Sos.sms(_contacts, "I'm walking to $dest (about $eta min). Follow my live location: $link");
-    } else {
-      _toast('Live link is not set up yet (see SETUP.md), so I am sending a one-time location.');
-      await Sos.sms(_contacts,
-          "I'm walking to $dest (about $eta min). I'm here now: https://maps.google.com/?q=${at.latitude},${at.longitude} . I'll message when I arrive.");
+
+    // 1. Dispatch to Police via 112 SMS if selected
+    if (shareWithPolice) {
+      final policeBody = Sos.formatPoliceLiveDispatch(
+        userName: _userName,
+        lat: at.latitude,
+        lng: at.longitude,
+        liveTrackUrl: link,
+        dest: dest,
+        etaMin: eta,
+        nearestPoliceStation: policeName,
+      );
+      await Sos.sms112(policeBody);
+
+      final user = AuthService.instance.currentUser;
+      if (user != null) {
+        unawaited(FirestoreService.instance.logSosEvent(
+          uid: user.uid,
+          at: at,
+          triggerType: 'police_live_share',
+          tripId: _trip.id,
+          contactsNotified: ['112 (ERSS Police)', ..._contacts],
+        ));
+      }
     }
+
+    // 2. Dispatch to Contacts if selected
+    if (shareWithContacts && _contacts.isNotEmpty) {
+      if (live && link != null) {
+        await Sos.sms(_contacts, "I'm walking to $dest (about $eta min). Follow my live location: $link");
+      } else {
+        await Sos.sms(_contacts,
+            "I'm walking to $dest (about $eta min). I'm here now: https://maps.google.com/?q=${at.latitude},${at.longitude} . I'll message when I arrive.");
+      }
+    }
+
+    _toast(shareWithPolice
+        ? 'Live sharing started & dispatched to ERSS 112 (Nearest: ${policeName ?? "Police"})'
+        : 'Live location sharing started with contacts');
+
     if (mounted) setState(() {});
+  }
+
+  /// Explicit 1-tap live location dispatch to ERSS 112 & nearest police station
+  Future<void> _dispatchLiveLocationToPolice() async {
+    final at = _me;
+    if (at == null) {
+      _toast('Waiting for your location. Please try again in a few seconds.');
+      return;
+    }
+
+    _toast('Locating nearest police station and preparing live dispatch…');
+    String? policeStationName;
+    try {
+      final policePlaces = await _engine.nearbyPlaces(at, 'police');
+      if (policePlaces.isNotEmpty) {
+        policeStationName = policePlaces.first.name;
+      }
+    } catch (_) {}
+
+    final dest = _dest?.name ?? 'Current Route';
+    final r = _sel;
+    final eta = r == null ? 0 : (r.raw.durationS / 60).ceil();
+
+    if (!_trip.active) {
+      await _trip.start(
+        at: at,
+        dest: dest,
+        etaMin: eta,
+        guardianEnd: _guardianEnd,
+        alertPolice: true,
+        nearestPolice: policeStationName,
+      );
+    } else {
+      await _trip.setPoliceAlert(alerted: true, nearestPolice: policeStationName);
+    }
+
+    final link = _trip.link;
+    final body = Sos.formatPoliceLiveDispatch(
+      userName: _userName,
+      lat: at.latitude,
+      lng: at.longitude,
+      liveTrackUrl: link,
+      dest: dest,
+      etaMin: eta,
+      nearestPoliceStation: policeStationName,
+    );
+
+    // Also log to Firestore SOS events
+    final user = AuthService.instance.currentUser;
+    if (user != null) {
+      unawaited(FirestoreService.instance.logSosEvent(
+        uid: user.uid,
+        at: at,
+        triggerType: 'police_live_dispatch',
+        tripId: _trip.id,
+        contactsNotified: ['112 (ERSS Police Dispatch)'],
+      ));
+    }
+
+    // Send SMS to 112
+    await Sos.sms112(body);
+    if (mounted) {
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: AppColors.navy,
+          content: Text(
+            policeStationName != null
+                ? 'Live tracking dispatched to ERSS 112 & $policeStationName'
+                : 'Live tracking dispatched to ERSS 112 via SMS',
+          ),
+          action: SnackBarAction(
+            label: 'Call 112',
+            textColor: Colors.orangeAccent,
+            onPressed: () => Emergency.call('112'),
+          ),
+        ),
+      );
+    }
   }
 
   Future<void> _stopSharing() async {
@@ -1347,6 +1623,19 @@ class _RouteMapScreenState extends State<RouteMapScreen> {
             OutlinedButton(
                 onPressed: () { Navigator.pop(ctx); Emergency.call('112'); },
                 child: const Text('Call 112 only')),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.indigo.shade800,
+                  side: BorderSide(color: Colors.indigo.shade300),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                ),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _dispatchLiveLocationToPolice();
+                },
+                icon: const Icon(Icons.local_police, color: Colors.indigo),
+                label: const Text('Send Live Location to Police (ERSS 112 SMS)')),
             Row(children: [
               Expanded(child: TextButton(onPressed: () => Emergency.dial('1091'), child: const Text('Women helpline 1091'))),
               Expanded(child: TextButton(onPressed: () => Emergency.dial('1090'), child: const Text('Women helpline 1090 (UP)'))),
